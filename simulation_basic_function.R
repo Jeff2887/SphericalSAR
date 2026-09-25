@@ -1220,32 +1220,27 @@ PSSAR_trans_sim_prediction_function2 <- function(seed_set,sample_size, rho0=0.8)
 PSSAR_sim_prediction_int_function <- function(seed_set,sample_size,d=6,neigh_set,rho0=0.8,alpha){
   set.seed(seed_set)
   n <- sample_size
-  mu <- rep(1,d)   # shared mean vector
-  mu <- mu / sqrt(sum(mu^2))  # normalize
+  mu <- rep(1,d)   
+  mu <- mu / sqrt(sum(mu^2))  
   
-  # ----------------------
-  # Generate Spatial Coordinates and Distance Matrix
-  # ----------------------
   coords <- matrix(runif(n * 2), ncol = 2)
   dist_matrix <- as.matrix(dist(coords))
   
   # ----------------------
-  # Define neighbor adjacency matrix W (kNN based on distance)
+  # Define neighbor adjacency matrix W 
   # ----------------------
-  k <- neigh_set         # number of non-zero neighbors per row
+  k <- neigh_set         
   
   # Initialize W as all zeros
   W <- matrix(0, n, n)
   
   for (i in 1:n) {
-    # Order distances, drop the 1st (distance to self is 0)
     dists_i <- dist_matrix[i, ]
     ordered_idx <- order(dists_i)
     neighbors <- ordered_idx[ordered_idx != i][1:k]
     
     for (j in neighbors) {
-      # assign weight based on inverse distance
-      w_val <- 1 #1 / dist_matrix[i, j]
+      w_val <- 1 
       W[i, j] <- w_val
       W[j, i] <- w_val   
     }
@@ -1254,22 +1249,17 @@ PSSAR_sim_prediction_int_function <- function(seed_set,sample_size,d=6,neigh_set
   # Row-standardize
   row_sums <- rowSums(W)
   W <- W / row_sums
-  
   q_bar <- 0 
   
   # Noise terms
   epsilon <- lapply(1:n, function(i) rSkewSym(d,kappa=5*d^(1.5)))
   epsilon_mean <- Reduce("+", epsilon) / n
   
-  # Solve SAR-like system for q_i
+  # Solve SAR
   I_n <- diag(n)
-  
-  # Stack epsilon as vector of skew-symmetric matrices
   E <- epsilon
-  
-  # Compute residuals
-  Q_resid <- solve(I_n - rho0 * W)  # operator on residuals
-  # Apply to each element in E
+
+  Q_resid <- solve(I_n - rho0 * W) 
   Q <- vector("list", n)
   for (i in 1:n) {
     Qi <- matrix(0, d, d)
@@ -1294,7 +1284,6 @@ PSSAR_sim_prediction_int_function <- function(seed_set,sample_size,d=6,neigh_set
   
   mu_intrinsic <- intrinsic_mean_sphere(y_train)
   ## compute G_n
-  # Compute Gram matrix G_hat
   Q <- list()
   for (i in 1:n) {
     opt_tran <- log_rotation(mu_intrinsic,y[i,])
@@ -1307,9 +1296,9 @@ PSSAR_sim_prediction_int_function <- function(seed_set,sample_size,d=6,neigh_set
   G_hat <- matrix(0, n_train, n_train)
   for (j in 1:n_train) {
     for (k in 1:n_train) {
-      A <- Q[[j]] - q_hat 
-      B <- Q[[k]] - q_hat 
-      G_hat[j,k] <- sum(diag(t(A) %*% B))  
+      A <- Q[[j]] - q_hat ##q_bar
+      B <- Q[[k]] - q_hat ##q_bar
+      G_hat[j,k] <- sum(diag(t(A) %*% B))  # Frobenius inner product
     }
   }
   
@@ -1324,7 +1313,6 @@ PSSAR_sim_prediction_int_function <- function(seed_set,sample_size,d=6,neigh_set
   rho_hat <- optimize(objective, interval=c(-0.99, 0.99), W=W_train, G_hat=G_hat)$minimum
   
   ##prediction
-  # Weighted sum of deviations
   sum_dev <- Reduce("+", lapply(1:n_train, function(j) {
     W[n, j] * (Q[[j]] - q_hat)
   }))
@@ -1341,131 +1329,47 @@ PSSAR_sim_prediction_int_function <- function(seed_set,sample_size,d=6,neigh_set
   print(sum(y_pred^2))
   
   
-  ## prediction interval
-  # Split indices
-  idx <- sample(1:(n-1), (n-1))
-  train <- idx[1:round((n-1)/2)]
-  calib <- idx[(round((n-1)/2) + 1):(n-1)]
-  
-  # 3. Fit SAR on training
-  W_train <- W[train, train]
-  y_train <- y[train,]
-  mu_intrinsic <- intrinsic_mean_sphere(y_train)
-  
-  Q <- list()
-  for (k in 1:(n-1)) {
-    opt_tran <- log_rotation(mu_intrinsic,y[k,])
-    Q[[k]] <- opt_tran$L
-  }
-  
-  Q_train <- Q[train]
-  train_len <- length(train)
-  
-  q_hat <- Reduce("+", Q_train) / train_len
-  G_hat <- matrix(0, train_len, train_len)
-  for (j in 1:train_len) {
-    for (k in 1:train_len) {
-      A <- Q_train[[j]] - q_hat 
-      B <- Q_train[[k]] - q_hat 
-      G_hat[j,k] <- sum(diag(t(A) %*% B))  # Frobenius inner product
+  ## prediction interval 
+  R_vec <- rep(0, n_train)
+  for (i in 1:n_train) {
+    spatial_part_i <- matrix(0, d, d)
+    for (j in 1:n_train) {
+      spatial_part_i <- spatial_part_i + W[i, j] * (Q[[j]] - q_hat)
     }
-  }
-  ## cost function
-  objective <- function(rho, W, G_hat) {
-    S <- diag(nrow(W)) - rho * W
-    val <- sum(diag(t(S) %*% W %*% S %*% G_hat))
-    return(val^2)
+    eps_hat_i <- (Q[[i]] - q_hat) - rho_hat * spatial_part_i
+    R_vec[i] <- sqrt(sum(eps_hat_i^2))
   }
   
-  rho_hat <- optimize(objective, interval=c(-0.99, 0.99), W=W_train, G_hat=G_hat)$minimum
-  
-  
-  # 4. Compute calibration residuals strictly OUT-OF-SAMPLE using only training data
-  R_vec_calib <- rep(0, length(calib))
-  
-  for (idx_c in 1:length(calib)) {
-    i_cal <- calib[idx_c] # The actual index of the calibration node
-    
-    # Predict calibration node using ONLY the training set
-    sum_dev_cal <- Reduce("+", lapply(train, function(j) {
-      W[i_cal, j] * (Q[[j]] - q_hat)
-    }))
-    
-    q_i_pred <- q_hat + rho_hat * sum_dev_cal
-    
-    # Calculate the absolute residual (Frobenius norm)
-    R_vec_calib[idx_c] <- sqrt(sum((Q[[i_cal]] - q_i_pred)^2))
+  # Empirical quantile = inverse empirical CDF (no interpolation).
+  # This is the quantile used in the manuscript's asymptotic result.
+  empirical_quantile <- function(scores, alpha_current) {
+    m <- length(scores)
+    k_alpha <- ceiling((1 - alpha_current) * m)
+    k_alpha <- min(max(k_alpha, 1), m)
+    sort(scores)[k_alpha]
   }
   
-  scores <- R_vec_calib
+  # Prediction score for the held-out target site n, using the same fitted
+  # centre mu_intrinsic, q_hat and rho_hat as in the prediction above.
+  R_new <- log_rotation(mu_intrinsic, y[n,])
+  predict_score <- sqrt(sum((R_new$L - q_n_pred)^2))
   
-  calib_distances <- dist_matrix[n, calib]
-  
-  # Use a Gaussian kernel to compute spatial weights
-  eta <- median(dist_matrix[dist_matrix > 0])
-  w_raw_initial <- exp(-(calib_distances^2) / (2 * eta^2))
-  
-  w_raw <- w_raw_initial
-  sum_w <- sum(w_raw) + 1
-  w_tilde <- w_raw / sum_w
-  w_tilde_n <- 1 / sum_w
-  
-  # Create weighted empirical distribution
-  ord <- order(scores)
-  sort_scores <- scores[ord]
-  sort_w <- w_tilde[ord]
-  
-  vals <- c(sort_scores, Inf)
-  cum_probs <- cumsum(c(sort_w, w_tilde_n))
-  # ---------------------------------------------
-  
-  if (length(alpha)==1){
-    # Find the weighted quantile
-    q_alpha <- vals[which(cum_probs >= (1 - alpha))[1]]
-    
-    ##prediction
-    # Weighted sum of deviations
-    sum_dev <- Reduce("+", lapply(train, function(j) {
-      W[n, j] * (Q[[j]] - q_hat)
-    }))
-    
-    q_n_pred <- q_hat + rho_hat * sum_dev 
-    
-    R_new <- log_rotation(mu_intrinsic,y[n,])
-    predict_score <- sqrt(sum((R_new$L-q_n_pred)^2))
-    
-    # Check coverage
+  if (length(alpha) == 1) {
+    q_alpha <- empirical_quantile(R_vec, alpha)
     covered <- predict_score <= q_alpha
-    
-    return(c(pred_dist,covered,q_alpha))
-  } else{
+    return(c(pred_dist, covered, q_alpha))
+  } else {
     final_results <- pred_dist
     for (PI_level in 1:length(alpha)) {
       alpha_current <- alpha[PI_level]
-      
-      # Find the weighted quantile
-      q_alpha <- vals[which(cum_probs >= (1 - alpha_current))[1]]
-      
-      
-      ##prediction
-      # Weighted sum of deviations
-      sum_dev <- Reduce("+", lapply(train, function(j) {
-        W[n, j] * (Q[[j]] - q_hat)
-      }))
-      
-      q_n_pred <- q_hat + rho_hat * sum_dev 
-      
-      R_new <- log_rotation(mu_intrinsic,y[n,])
-      predict_score <- sqrt(sum((R_new$L-q_n_pred)^2))
-      
-      # Check coverage
+      q_alpha <- empirical_quantile(R_vec, alpha_current)
       covered <- predict_score <= q_alpha
-      
-      final_results <- c(final_results,covered,q_alpha)
+      final_results <- c(final_results, covered, q_alpha)
     }
     return(final_results)
   }
 }
+
 
 #### Frechet regression ####
 
@@ -1896,6 +1800,7 @@ SSARR_tangent_space_sim_function <- function(seed_set,sample_size,dim_set,neighb
 
 
 
+
 SSARR_sim_prediction_int_function <- function(seed_set,sample_size,d=6,neigh_set,rho0=0.8,alpha){
   set.seed(seed_set)
   n <- sample_size
@@ -1904,20 +1809,13 @@ SSARR_sim_prediction_int_function <- function(seed_set,sample_size,d=6,neigh_set
   # ----------------------
   # Define neighbor adjacency matrix W
   # ----------------------
-  k <- neigh_set         # number of non-zero neighbors per row
+  k <- neigh_set         
   
-  # ----------------------
-  # Generate Spatial Coordinates and Distance Matrix
-  # ----------------------
   coords <- matrix(runif(n * 2), ncol = 2)
   dist_matrix <- as.matrix(dist(coords))
   
-  # ----------------------
-  # Define neighbor adjacency matrix W (kNN based on distance)
-  # ----------------------
-  k <- neigh_set         # number of non-zero neighbors per row
+  k <- neigh_set       
   
-  # Initialize W as all zeros
   W <- matrix(0, n, n)
   
   for (i in 1:n) {
@@ -1928,7 +1826,7 @@ SSARR_sim_prediction_int_function <- function(seed_set,sample_size,d=6,neigh_set
     for (j in neighbors) {
       w_val <- 1 
       W[i, j] <- w_val
-      W[j, i] <- w_val   # 
+      W[j, i] <- w_val   
     }
   }
   
@@ -1954,6 +1852,7 @@ SSARR_sim_prediction_int_function <- function(seed_set,sample_size,d=6,neigh_set
   # Step 1: generate noise in tangent space
   epsilon <- movMF::rmovMF(n, concern_par*m2)
 
+  
   # Step 2: solve SAR for xi_i
   I_n <- diag(n)
   xi_mat <- solve(I_n - rho0 * W) %*% epsilon  # n x d
@@ -1963,9 +1862,7 @@ SSARR_sim_prediction_int_function <- function(seed_set,sample_size,d=6,neigh_set
   y <- y / row_norms
   
   ## consider use 1,...,n-1 to predict n
-  
-  
-  
+
   n_train <- n-1
   y_train <- y[1:n_train,]
   W_train <- W[1:n_train,1:n_train]
@@ -1975,7 +1872,6 @@ SSARR_sim_prediction_int_function <- function(seed_set,sample_size,d=6,neigh_set
   x_train <- x[1:n_train,]
   mean_est <- GloSpheReg(x_train,y_train,x)$yout
   ## compute G_n
-  # Compute Gram matrix G_hat
   Q <- list()
   for (i in 1:n) {
     opt_tran <- log_rotation(mean_est[i,],y[i,])
@@ -1991,7 +1887,7 @@ SSARR_sim_prediction_int_function <- function(seed_set,sample_size,d=6,neigh_set
     for (k in 1:n_train) {
       A <- Q[[j]] - q_hat 
       B <- Q[[k]] - q_hat 
-      G_hat[j,k] <- sum(diag(t(A) %*% B))  # Frobenius inner product
+      G_hat[j,k] <- sum(diag(t(A) %*% B)) 
     }
   }
   
@@ -2006,12 +1902,11 @@ SSARR_sim_prediction_int_function <- function(seed_set,sample_size,d=6,neigh_set
   rho_hat <- optimize(objective, interval=c(-0.99, 0.99), W=W_train, G_hat=G_hat)$minimum
   
   ##prediction
-  # Weighted sum of deviations
   sum_dev <- Reduce("+", lapply(1:n_train, function(j) {
     W[n, j] * (Q[[j]] - q_hat)
   }))
   
-  W_row <- W[n, ]        # n-th row
+  W_row <- W[n, ]      
   w_nn <- W[n, n]
   q_n_pred <- q_hat + rho_hat * sum_dev / (1 - rho_hat * w_nn)
   
@@ -2023,138 +1918,40 @@ SSARR_sim_prediction_int_function <- function(seed_set,sample_size,d=6,neigh_set
   y_true <- y[n,]
   pred_dist <- as.numeric(acos(t(y_pred) %*% y_true))
   print(sum(y_pred^2))
-  ## prediction interval
-  # Split indices
-  idx <- sample(1:(n-1), (n-1))
-  train <- idx[1:round((n-1)/2)]
-  calib <- idx[(round((n-1)/2) + 1):(n-1)]
+ 
+  res_weight <- diag(n_train) - rho_hat * W_train
+  scores <- rep(0, n_train)
   
-  # 3. Fit SAR on training
-  W_train <- W[train, train]
-  y_train <- y[train,]
-  
-  x_train <- x[train,]
-  mean_est <- GloSpheReg(x_train,y_train,x)$yout
-  ## compute G_n
-  # Compute Gram matrix G_hat
-  Q <- list()
-  for (i in 1:(n-1)) {
-    opt_tran <- log_rotation(mean_est[i,],y[i,])
-    Q[[i]] <- opt_tran$L
-  }
-  
-  
-  Q_train <- Q[train]
-  train_len <- length(train)
-  
-  q_hat <- Reduce("+", Q_train) / train_len
-  G_hat <- matrix(0, train_len, train_len)
-  for (j in 1:train_len) {
-    for (k in 1:train_len) {
-      A <- Q_train[[j]] - q_hat 
-      B <- Q_train[[k]] - q_hat 
-      G_hat[j,k] <- sum(diag(t(A) %*% B))  # Frobenius inner product
+  for (i in 1:n_train) {
+    R_i <- matrix(0, d, d)
+    for (j in 1:n_train) {
+      R_i <- R_i + res_weight[i, j] * (Q[[j]] - q_hat)
     }
-  }
-  ## cost function
-  objective <- function(rho, W, G_hat) {
-    S <- diag(nrow(W)) - rho * W
-    val <- sum(diag(t(S) %*% W %*% S %*% G_hat))
-    return(val^2)
+    scores[i] <- sqrt(sum(R_i^2))
   }
   
-  rho_hat <- optimize(objective, interval=c(-0.99, 0.99), W=W_train, G_hat=G_hat)$minimum
+  predict_score <- sqrt(sum((Q[[n]] - q_n_pred)^2))
   
-
-  R_vec_calib <- rep(0, length(calib))
-  
-  for (idx_c in 1:length(calib)) {
-    i_cal <- calib[idx_c] # The actual index of the calibration node
-    
-    # Predict calibration node using ONLY the training set
-    sum_dev_cal <- Reduce("+", lapply(train, function(j) {
-      W[i_cal, j] * (Q[[j]] - q_hat)
-    }))
-    
-    q_i_pred <- q_hat + rho_hat * sum_dev_cal
-    
-    # Calculate the absolute residual (Frobenius norm)
-    R_vec_calib[idx_c] <- sqrt(sum((Q[[i_cal]] - q_i_pred)^2))
+  empirical_radius <- function(alpha_level) {
+    as.numeric(quantile(scores, probs = 1 - alpha_level, type = 1, names = FALSE))
   }
   
-  scores <- R_vec_calib
-  
-  # --- NONEXCHANGEABLE SPLIT CONFORMAL ---
-
-  calib_distances <- dist_matrix[n, calib]
-  
-  # Use a Gaussian kernel to compute spatial weights
-
-  eta <- median(dist_matrix[dist_matrix > 0])
-  w_raw_initial <- exp(-(calib_distances^2) / (2 * eta^2))
-  
-  w_raw <- w_raw_initial
-  sum_w <- sum(w_raw) + 1
-  w_tilde <- w_raw / sum_w
-  w_tilde_n <- 1 / sum_w
-  
-  # Create weighted empirical distribution
-  ord <- order(scores)
-  sort_scores <- scores[ord]
-  sort_w <- w_tilde[ord]
-  
-  vals <- c(sort_scores, Inf)
-  cum_probs <- cumsum(c(sort_w, w_tilde_n))
-  # ---------------------------------------------
-  
-  if (length(alpha)==1){
-    # Find the weighted quantile
-    q_alpha <- vals[which(cum_probs >= (1 - alpha))[1]]
-    
-    # 5. Pick one test node (outside train/calib)
-    
-    ##prediction
-    # Weighted sum of deviations
-    sum_dev <- Reduce("+", lapply(train, function(j) {
-      W[n, j] * (Q[[j]] - q_hat)
-    }))
-    
-    q_n_pred <- q_hat + rho_hat * sum_dev 
-    
-    R_new <- log_rotation(mean_est[n,],y[n,])
-    predict_score <- sqrt(sum((R_new$L-q_n_pred)^2))
-    
-    # Check coverage
+  if (length(alpha) == 1) {
+    q_alpha <- empirical_radius(alpha)
     covered <- predict_score <= q_alpha
-    
-    return(c(pred_dist,covered,q_alpha))
-  } else{
+    return(c(pred_dist, covered, q_alpha))
+  } else {
     final_results <- pred_dist
-    for (PI_level in 1:length(alpha)) {
+    for (PI_level in seq_along(alpha)) {
       alpha_current <- alpha[PI_level]
-      q_alpha <- vals[which(cum_probs >= (1 - alpha_current))[1]]
-
-      ##prediction
-      # Weighted sum of deviations
-      sum_dev <- Reduce("+", lapply(train, function(j) {
-        W[n, j] * (Q[[j]] - q_hat)
-      }))
-      
-      q_n_pred <- q_hat + rho_hat * sum_dev 
-      
-      R_new <- log_rotation(mean_est[n,],y[n,])
-      predict_score <- sqrt(sum((R_new$L-q_n_pred)^2))
-      
-      # Check coverage
+      q_alpha <- empirical_radius(alpha_current)
       covered <- predict_score <= q_alpha
-      
-      final_results <- c(final_results,covered,q_alpha)
+      final_results <- c(final_results, covered, q_alpha)
     }
     return(final_results)
   }
   
 }
-
 
 SSARR_trans_sim_prediction_function2 <- function(seed_set,sample_size, rho0=0.8){
   set.seed(seed_set)
@@ -2166,7 +1963,7 @@ SSARR_trans_sim_prediction_function2 <- function(seed_set,sample_size, rho0=0.8)
   # ----------------------
   # Define neighbor adjacency matrix W
   # ----------------------
-  k <- 20         # number of non-zero neighbors per row
+  k <- 20        
   
   
   
