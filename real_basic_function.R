@@ -2553,101 +2553,187 @@ SRMSAR_fit_function<- function(y,W,X,dim_red='PCA'){
 }
 
 
-conformal_PI_function <- function(y,W,ind,dist_matrix,alpha = 0.1){
-  ## consider use 1,...,n-1 to predict n
-  n = nrow(y)
-  d = ncol(y)
-  ind_set <- setdiff(1:n,ind)
+PI_function <- function(y, W, ind, dist_matrix = NULL, alpha = 0.1) {
   
-  idx <- sample(ind_set, (n-1))
-  train <- idx[1:round((n-1)/2)]
-  calib <- idx[(round((n-1)/2) + 1):(n-1)]
+  n <- nrow(y)
+  d <- ncol(y)
+  
+  if (length(ind) != 1L) {
+    stop("`ind` must contain exactly one target location.")
+  }
+  
+  ind_set <- setdiff(seq_len(n), ind)
+  n_obs <- length(ind_set)
   
   
-  dist_numeric <- units::drop_units(dist_matrix)
-  calib_distances <- dist_numeric[n, calib]
-  eta <- median(dist_numeric[dist_numeric > 0])
-  w_raw_initial <- exp(-(calib_distances^2)/(2 * eta^2))
-  w_raw <- w_raw_initial
-  sum_w <- sum(w_raw) + 1
-  w_tilde <- w_raw / sum_w
-  w_tilde_n <- 1 / sum_w
+  y_obs <- y[ind_set, , drop = FALSE]
+  W_obs <- W[ind_set, ind_set, drop = FALSE]
   
-  # 3. Fit SAR on training
-  W_train <- W[train, train]
-  y_train <- y[train,]
-  mu_intrinsic <- intrinsic_mean_sphere(y_train)
+  mu_intrinsic <- intrinsic_mean_sphere(y_obs)
   
-  Q <- list()
-  for (k in 1:n) {
-    opt_tran <- log_rotation(mu_intrinsic,y[k,])
+  Q <- vector("list", n)
+  for (k in seq_len(n)) {
+    opt_tran <- log_rotation(mu_intrinsic, y[k, ])
     Q[[k]] <- opt_tran$L
   }
   
-  Q_train <- Q[train]
-  train_len <- length(train)
+  Q_obs <- Q[ind_set]
+  q_hat <- Reduce("+", Q_obs) / n_obs
   
-  q_hat <- Reduce("+", Q_train) / train_len
-  G_hat <- matrix(0, train_len, train_len)
-  for (j in 1:train_len) {
-    for (k in 1:train_len) {
-      A <- Q_train[[j]] - q_hat 
-      B <- Q_train[[k]] - q_hat 
-      G_hat[j,k] <- sum(diag(t(A) %*% B))  # Frobenius inner product
+  G_hat <- matrix(0, n_obs, n_obs)
+  for (j in seq_len(n_obs)) {
+    for (k in seq_len(n_obs)) {
+      A <- Q_obs[[j]] - q_hat
+      B <- Q_obs[[k]] - q_hat
+      G_hat[j, k] <- sum(A * B)  
     }
   }
-  ## cost function
+  
   objective <- function(rho, W, G_hat) {
     S <- diag(nrow(W)) - rho * W
     val <- sum(diag(t(S) %*% W %*% S %*% G_hat))
-    return(val^2)
+    val^2
   }
   
-  rho_hat <- optimize(objective, interval=c(-0.99, 0.99), W=W_train, G_hat=G_hat)$minimum
+  rho_hat <- optimize(
+    objective,
+    interval = c(-0.99, 0.99),
+    W = W_obs,
+    G_hat = G_hat
+  )$minimum
   
-  # 4. Compute calibration residuals using full W 
-  R_vec <- rep(0,(n-1))
-  res_weight <- diag(n-1) - rho_hat * W[ind_set,ind_set]
-  row_ind <- 1
-  for (i in ind_set) {
-    Ri <- matrix(0, d, d)
-    col_ind <- 1
-    for (j in ind_set) {
-      Ri <- Ri + res_weight[row_ind,col_ind] * (Q[[j]]-q_hat) 
-      col_ind <- col_ind + 1
+  
+  res_weight <- diag(n_obs) - rho_hat * W_obs
+  scores <- numeric(n_obs)
+  
+  for (i_obs in seq_len(n_obs)) {
+    eps_hat_i <- matrix(0, d, d)
+    
+    for (j_obs in seq_len(n_obs)) {
+      eps_hat_i <- eps_hat_i +
+        res_weight[i_obs, j_obs] * (Q_obs[[j_obs]] - q_hat)
     }
-    R_vec[row_ind] <- sqrt(sum(Ri^2))
-    row_ind <- row_ind + 1
+    
+    scores[i_obs] <- sqrt(sum(eps_hat_i^2))
   }
   
-  R_vec_full <- rep(0,n)
-  R_vec_full[ind_set] <- R_vec
-  scores <- R_vec_full[calib]
   
-  ord <- order(scores)
-  sort_scores <- scores[ord]
-  sort_w <- w_tilde[ord]
-  
-  vals <- c(sort_scores, Inf)
-  cum_probs <- cumsum(c(sort_w, w_tilde_n))
-  
-  q_alpha <- vals[which(cum_probs >= (1 - alpha))[1]]
+  q_alpha <- vapply(
+    alpha,
+    function(a) {
+      as.numeric(quantile(scores, probs = 1 - a, type = 1, names = FALSE))
+    },
+    numeric(1)
+  )
   
   
-  # For a new residual R_new, check coverage
-  y_true <- y[ind,]
-  R_new <- log_rotation(mu_intrinsic,y_true)
+  sum_dev <- matrix(0, d, d)
+  for (j in ind_set) {
+    sum_dev <- sum_dev + W[ind, j] * (Q[[j]] - q_hat)
+  }
   
-  sum_dev <- Reduce("+", lapply(train, function(j) {
-    W[n, j] * (Q[[j]] - q_hat)
-  }))
+  q_ind_pred <- q_hat + rho_hat * sum_dev
   
-  q_n_pred <- q_hat + rho_hat * sum_dev 
+  R_new <- log_rotation(mu_intrinsic, y[ind, ])
+  predict_score <- sqrt(sum((R_new$L - q_ind_pred)^2))
   
-  predict_score <- sqrt(sum((R_new$L-q_n_pred)^2))
-  
-  inside <- (predict_score <= q_alpha)
-  
+  inside <- predict_score <= q_alpha
   
   return(inside)
 }
+
+
+SRMSAR_PI_function <- function(y, W, X, ind, alpha = 0.1) {
+  
+  n <- nrow(y)
+  d <- ncol(y)
+  
+  if (length(ind) != 1L) {
+    stop("`ind` must contain exactly one target location.")
+  }
+  
+  ind_set <- setdiff(seq_len(n), ind)
+  n_obs <- length(ind_set)
+  
+  
+  y_obs <- y[ind_set, , drop = FALSE]
+  W_obs <- W[ind_set, ind_set, drop = FALSE]
+  X_obs <- X[ind_set, , drop = FALSE]
+  
+  # Keep one-column X as a matrix
+  if (ncol(X) == 1L) {
+    X_obs <- matrix(X_obs, nrow = n_obs, ncol = 1)
+  }
+  
+  mean_est <- GloSpheReg(X_obs, y_obs, X)$yout
+  
+  # q_i = y_i \ominus mu_hat_i
+  Q <- vector("list", n)
+  for (k in seq_len(n)) {
+    opt_tran <- log_rotation(mean_est[k, ], y[k, ])
+    Q[[k]] <- opt_tran$L
+  }
+  
+  Q_obs <- Q[ind_set]
+  q_hat <- Reduce("+", Q_obs) / n_obs
+  
+  G_hat <- matrix(0, n_obs, n_obs)
+  for (j in seq_len(n_obs)) {
+    for (k in seq_len(n_obs)) {
+      A <- Q_obs[[j]] - q_hat
+      B <- Q_obs[[k]] - q_hat
+      G_hat[j, k] <- sum(A * B)  
+    }
+  }
+  
+  objective <- function(rho, W, G_hat) {
+    S <- diag(nrow(W)) - rho * W
+    val <- sum(diag(t(S) %*% W %*% S %*% G_hat))
+    val^2
+  }
+  
+  rho_hat <- optimize(
+    objective,
+    interval = c(-0.99, 0.99),
+    W = W_obs,
+    G_hat = G_hat
+  )$minimum
+  
+  res_weight <- diag(n_obs) - rho_hat * W_obs
+  scores <- numeric(n_obs)
+  
+  for (i_obs in seq_len(n_obs)) {
+    eps_hat_i <- matrix(0, d, d)
+    
+    for (j_obs in seq_len(n_obs)) {
+      eps_hat_i <- eps_hat_i +
+        res_weight[i_obs, j_obs] * (Q_obs[[j_obs]] - q_hat)
+    }
+    
+    scores[i_obs] <- sqrt(sum(eps_hat_i^2))
+  }
+  
+  q_alpha <- vapply(
+    alpha,
+    function(a) {
+      as.numeric(quantile(scores, probs = 1 - a, type = 1, names = FALSE))
+    },
+    numeric(1)
+  )
+  
+  sum_dev <- matrix(0, d, d)
+  for (j in ind_set) {
+    sum_dev <- sum_dev + W[ind, j] * (Q[[j]] - q_hat)
+  }
+  
+  q_ind_pred <- q_hat + rho_hat * sum_dev
+  
+  # Simulation-only evaluation score for the held-out true response
+  R_new <- log_rotation(mean_est[ind, ], y[ind, ])
+  predict_score <- sqrt(sum((R_new$L - q_ind_pred)^2))
+  
+  inside <- predict_score <= q_alpha
+  
+  return(inside)
+}
+
