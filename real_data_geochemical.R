@@ -414,15 +414,15 @@ plot_list[[1]] + plot_list[[2]] + plot_list[[3]] + plot_list[[4]] + plot_list[[5
   theme(legend.position = "bottom")
 
 
-## conformal prediction
-conformal_pred <- NULL
+## prediction interval
+PI_vec <- NULL
 for (i in 1:n) {
-  pred_int_results <- conformal_PI_function(y,W,i,dist_result,0.1)
+  pred_int_results <- PI_function(y,W,i,dist_result,0.1)
   print(pred_int_results)
-  conformal_pred <- c(conformal_pred,pred_int_results)
+  PI_vec <- c(PI_vec,pred_int_results)
 }
 
-mean(conformal_pred)
+mean(PI_vec)
 
 
 #### SSAREXR ####
